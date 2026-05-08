@@ -1,64 +1,88 @@
-//Dois sensores FINALIZADO PRONTO CERTO VELOCIDADE LENTA
-#include <zephyr/kernel.h>            
-#include <zephyr/device.h>            
-#include <zephyr/drivers/gpio.h>  
-#include <pwm_z42.h>
+//ultrassom SOLO FINALIZADO
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
+#include "pwm_z42.h"
 
-#define INPUT_PORT  DEVICE_DT_NAME(DT_NODELABEL(gpioe))   // Porta E = GPIO_4 no seu .dts
-#define INPUT_PIN_E   20         // PTE20
-#define INPUT_PIN_D  21         // PTE21
-#define TPM_MODULE 1000        
-uint16_t duty_1  = TPM_MODULE/1.3;
-uint16_t duty_2  = TPM_MODULE/1.3;
+#define TPM_IRQ_LINE TPM1_IRQn
+#define TPM_IRQ_PRIORITY 1
+#define TPM_INPUT_CAPTURE_BOTH (TPM_CnSC_ELSA_MASK | TPM_CnSC_ELSB_MASK)
+#define TPM_CHANNEL_INTERRUPT (TPM_CnSC_CHIE_MASK)
+// Definição dos pinos
+#define ECHO_PIN 12   // PTA12
+#define TRIG_PIN 31    // PTE31
 
-int main(void)
+// Variáveis para cálculo
+volatile uint32_t tempo_subida = 0;
+volatile uint32_t largura_pulso = 0;
+
+// Device de GPIO para o Trigger
+const struct device *gpioa_dev = DEVICE_DT_GET(DT_NODELABEL(gpioa));
+const struct device *gpioe_dev = DEVICE_DT_GET(DT_NODELABEL(gpioe));
+
+void tpm1_isr(void *arg)
 {
-    const struct device *input_dev;
-    int val_e, val_d;
-    pwm_tpm_Init(TPM0, TPM_PLLFLL, TPM_MODULE, TPM_CLK, PS_128, EDGE_PWM);
-    //pwm_tpm_Ch_Init(TPM0, 0, TPM_PWM_H, GPIOD, 0);
-    pwm_tpm_Ch_Init(TPM0, 4, TPM_PWM_H, GPIOD, 4);
-    pwm_tpm_Ch_Init(TPM0, 5, TPM_PWM_H, GPIOD, 5);
-    pwm_tpm_Ch_Init(TPM0, 2, TPM_PWM_H, GPIOD, 2);
-    pwm_tpm_Ch_Init(TPM0, 3, TPM_PWM_H, GPIOD, 3);
+    uint32_t valor_atual = TPM1->CONTROLS[0].CnV;
 
-    input_dev = device_get_binding(INPUT_PORT);
- 
-    gpio_pin_configure(input_dev, INPUT_PIN_E, GPIO_INPUT);
-    gpio_pin_configure(input_dev, INPUT_PIN_D, GPIO_INPUT);
+    // Se o pino PTE20 estiver em 1, é borda de subida
+    if (GPIOA->PDIR & (1 << ECHO_PIN)) { 
+        tempo_subida = valor_atual;
+    } else {
+        // Se estiver em 0, é borda de descida (calcula a diferença)
+        if (valor_atual >= tempo_subida) {
+            largura_pulso = valor_atual - tempo_subida;
+        } else {
+            largura_pulso = (65535 - tempo_subida) + valor_atual;
+        }
+    }
+    TPM1->STATUS |= TPM_STATUS_CH0F_MASK; 
+}
 
-    while (1) {
-        val_e = gpio_pin_get(input_dev, INPUT_PIN_E);
-        val_d = gpio_pin_get(input_dev, INPUT_PIN_D);
+void main(void)
+{
+    gpio_pin_configure(gpioe_dev, TRIG_PIN, GPIO_OUTPUT_INACTIVE);
 
-        if (val_e==0 && val_d==1){
-        pwm_tpm_CnV(TPM0, 2, duty_2);
-        pwm_tpm_CnV(TPM0, 4, 0);
-        pwm_tpm_CnV(TPM0, 3, 0);
-         pwm_tpm_CnV(TPM0, 5, duty_1);
-         printk ("direita\n");
+    // 2. Configurar Interrupção e Timer
+    IRQ_CONNECT(TPM_IRQ_LINE, TPM_IRQ_PRIORITY, tpm1_isr, NULL, 0);
+    irq_enable(TPM_IRQ_LINE);
+    
+    // Inicializa TPM1 com OSCERCLK (8MHz) e Prescaler 128
+    pwm_tpm_Init(TPM1, TPM_OSCERCLK, 65535, TPM_CLK, PS_128, EDGE_PWM);
+    pwm_tpm_Ch_Init(TPM1, 0, TPM_INPUT_CAPTURE_BOTH | TPM_CHANNEL_INTERRUPT, GPIOA, ECHO_PIN);
+
+    while (1)
+    {
+        // 3. Disparar o Trigger (pulso de 10us)
+        gpio_pin_set(gpioe_dev, TRIG_PIN, 1);
+        k_busy_wait(10); 
+        gpio_pin_set(gpioe_dev, TRIG_PIN, 0);
+
+        // 4. Calcular distância
+        // Cada tick = 16us (8MHz / 128 = 62.5kHz -> 1/62.5k = 16us)
+        // Distância = (Tempo_total_us * Velocidade_som_cm_us) / 2
+        float tempo_total_us = largura_pulso * 16;
+        float dist_cm = (tempo_total_us * 0.0343) / 2;
+        if (dist_cm <= 5 && dist_cm >=1){
+        printk("até 5 cm\n");
         }
-        else if (val_d==0 && val_e==1){
-        pwm_tpm_CnV(TPM0, 2, 0);
-        pwm_tpm_CnV(TPM0, 4, duty_2);
-        pwm_tpm_CnV(TPM0, 3, duty_1);
-        pwm_tpm_CnV(TPM0, 5, 0);
-        printk ("esquerda\n");
+        else if (dist_cm <= 10 && dist_cm>5){
+             printk("Até 10 cm\n");
         }
-        else if (val_e==0 && val_d==0){
-        pwm_tpm_CnV(TPM0, 2, duty_1);
-        pwm_tpm_CnV(TPM0, 4, duty_1);
-        pwm_tpm_CnV(TPM0, 5, 0);
-        pwm_tpm_CnV(TPM0, 3, 0);
-        printk ("Reto\n");
+        else if (dist_cm <= 15 && dist_cm > 10){
+            printk ("Até 15 cm\n");
         }
-        else if (val_e==1 && val_d==1){
-        pwm_tpm_CnV(TPM0, 2, duty_1);
-        pwm_tpm_CnV(TPM0, 4, duty_1);
-        pwm_tpm_CnV(TPM0, 3, 0);
-        pwm_tpm_CnV(TPM0, 5, 0);
-        printk ("reto\n");
+        else if (dist_cm <= 20 && dist_cm > 15){
+            printk ("Até 20 cm\n");
         }
-        k_msleep(60);
+        else {
+            printk ("Mais de 20 cm\n");
+        }
+
+        //if (dist_cm < 22) {
+        //    printk("Carrinho parado\n");
+        //} else {
+        //    printk("Mais de 20cm.\n");
+        //}
+
+        k_msleep(300); // Espera um pouco antes da próxima leitura
     }
 }
